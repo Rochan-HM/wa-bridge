@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { once } = require('events');
-const { createServer } = require('../server');
+const { createServer, renderQrPng } = require('../server');
 const { HttpError } = require('../format');
 
 function fakeBridge(overrides = {}) {
@@ -160,5 +160,56 @@ test('bridge errors keep their status and invalid JSON is 400', async () => {
     const fatal = await json(port, '/logout', { method: 'POST' });
     assert.equal(fatal.status, 500);
     assert.equal(fatal.body.error, 'internal error');
+  });
+});
+
+test('qr routes are unauthenticated and return a png plus json', async () => {
+  const payload = 'https://wa.me/settings/linked_devices#ref,noise,identity,adv,1';
+  await withServer(fakeBridge({
+    getQr() {
+      return {
+        qr: payload,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+        status: 'waiting-for-pairing-code',
+      };
+    },
+  }), async (port) => {
+    const info = await json(port, '/qr.json');
+    assert.equal(info.status, 200);
+    assert.deepEqual(info.body, {
+      qr: payload,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      status: 'waiting-for-pairing-code',
+    });
+
+    const pngRes = await fetch(`http://127.0.0.1:${port}/qr`);
+    assert.equal(pngRes.status, 200);
+    assert.equal(pngRes.headers.get('content-type'), 'image/png');
+    assert.equal(pngRes.headers.get('cache-control'), 'no-store');
+    const png = Buffer.from(await pngRes.arrayBuffer());
+    assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.deepEqual(png, await renderQrPng(payload));
+  });
+});
+
+test('qr routes report when no code is ready or the session is already linked', async () => {
+  let calls = 0;
+  await withServer(fakeBridge({
+    getQr() {
+      calls += 1;
+      if (calls <= 2) throw new HttpError(404, 'qr not ready');
+      throw new HttpError(409, 'already connected');
+    },
+  }), async (port) => {
+    const missing = await json(port, '/qr');
+    assert.equal(missing.status, 404);
+    assert.deepEqual(missing.body, { error: 'qr not ready' });
+
+    const missingJson = await json(port, '/qr.json');
+    assert.equal(missingJson.status, 404);
+
+    const linked = await json(port, '/qr');
+    assert.equal(linked.status, 409);
+    assert.equal(linked.body.error, 'already connected');
   });
 });

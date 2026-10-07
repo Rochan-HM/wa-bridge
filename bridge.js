@@ -46,7 +46,7 @@ async function clearDirContents(dir) {
   await Promise.all(entries.map((name) => fs.rm(path.join(dir, name), { recursive: true, force: true })));
 }
 
-function createBridge({ env = process.env, logger } = {}) {
+function createBridge({ env = process.env, logger, baileys: injectedBaileys = null } = {}) {
   const authDir = env.AUTH_DIR || '/data/baileys-auth';
   const dataDir = path.dirname(authDir);
   const inboxEnv = env.INBOX_PATH;
@@ -72,6 +72,7 @@ function createBridge({ env = process.env, logger } = {}) {
     registered: false,
     sock: null,
     generation: 0,
+    qr: null,
     qrAt: 0,
     issue: null,
     queue: [],
@@ -82,7 +83,7 @@ function createBridge({ env = process.env, logger } = {}) {
     timer: null,
     drainTimer: null,
     credSave: Promise.resolve(),
-    baileys: null,
+    baileys: injectedBaileys,
     log,
     baileysLogger,
   };
@@ -102,6 +103,15 @@ function createBridge({ env = process.env, logger } = {}) {
 
   function displayPhone() {
     return bridge.userPhone || bridge.phone || null;
+  }
+
+  function clearQr() {
+    bridge.qr = null;
+    bridge.qrAt = 0;
+  }
+
+  function qrAvailable() {
+    return !!(bridge.qr && !bridge.registered && bridge.status !== 'connected');
   }
 
   function lock(fn) {
@@ -191,6 +201,7 @@ function createBridge({ env = process.env, logger } = {}) {
     if (bridge.stopped || gen !== bridge.generation) return;
     const decision = classifyDisconnect(statusCode);
     if (decision.action === 'loggedOut') {
+      clearQr();
       bridge.registered = false;
       bridge.codeState = null;
       bridge.userPhone = null;
@@ -223,6 +234,7 @@ function createBridge({ env = process.env, logger } = {}) {
     if (bridge.stopped) return;
     const gen = ++bridge.generation;
     clearTimer();
+    clearQr();
     try {
       await openSocketBody(gen);
     } catch (err) {
@@ -235,7 +247,7 @@ function createBridge({ env = process.env, logger } = {}) {
 
   async function openSocketBody(gen) {
     await destroySocket();
-    bridge.qrAt = 0;
+    clearQr();
     bridge.codeState = null;
     bridge.issue = null;
     bridge.credSave = Promise.resolve();
@@ -295,6 +307,7 @@ function createBridge({ env = process.env, logger } = {}) {
         log.error({ err: String(err) }, 'failed to save creds');
       });
       bridge.registered = !!sock.authState?.creds?.registered;
+      if (bridge.registered) clearQr();
     });
 
     sock.ev.on('connection.update', (update) => {
@@ -318,9 +331,15 @@ function createBridge({ env = process.env, logger } = {}) {
     if (gen !== bridge.generation) return;
     const { connection, lastDisconnect, qr } = update;
 
-    // Baileys emits `qr` once the socket can accept a pairing IQ. Calling
-    // requestPairingCode earlier fails with "Connection Closed".
-    if (qr && !sock.authState?.creds?.registered) {
+    // Baileys emits `qr` (a wa.me linked-devices URL) once the socket can
+    // accept a pairing IQ. Calling requestPairingCode earlier fails with
+    // "Connection Closed". The same payload is what a phone camera scans.
+    if (
+      typeof qr === 'string' && qr &&
+      bridge.sock === sock &&
+      !sock.authState?.creds?.registered
+    ) {
+      bridge.qr = qr;
       bridge.qrAt = Date.now();
       setStatus('waiting-for-pairing-code');
       if (bridge.phone) {
@@ -329,8 +348,10 @@ function createBridge({ env = process.env, logger } = {}) {
         });
       }
     }
+    if (update.isNewLogin) clearQr();
 
     if (connection === 'open') {
+      clearQr();
       bridge.registered = true;
       bridge.backoff = 2000;
       bridge.codeState = null;
@@ -343,12 +364,13 @@ function createBridge({ env = process.env, logger } = {}) {
     }
 
     if (connection === 'close') {
+      clearQr();
+      if (bridge.sock === sock) bridge.sock = null;
       try { await bridge.credSave; } catch { /* logged above */ }
       if (gen !== bridge.generation) return;
       const statusCode = statusCodeFromDisconnect(lastDisconnect?.error);
       const loggedOut = statusCode === DisconnectReason.loggedOut;
       log.warn({ statusCode, loggedOut }, 'connection closed');
-      if (bridge.sock === sock) bridge.sock = null;
       scheduleReconnect(gen, statusCode);
     }
   }
@@ -465,7 +487,20 @@ function createBridge({ env = process.env, logger } = {}) {
         phone: displayPhone(),
         pairingCode: bridge.codeState?.code,
         updatedAt: bridge.updatedAt,
+        hasQr: qrAvailable(),
       });
+    },
+
+    getQr() {
+      if (bridge.status === 'connected' || bridge.registered) {
+        throw new HttpError(409, 'already connected');
+      }
+      if (!qrAvailable()) throw new HttpError(404, 'qr not ready');
+      return {
+        qr: bridge.qr,
+        updatedAt: new Date(bridge.qrAt).toISOString(),
+        status: bridge.status,
+      };
     },
 
     async pair(rawPhone) {
@@ -543,7 +578,7 @@ function createBridge({ env = process.env, logger } = {}) {
         bridge.issue = null;
         bridge.registered = false;
         bridge.userPhone = null;
-        bridge.qrAt = 0;
+        clearQr();
         if (sock) {
           try { sock.ev.removeAllListeners(); } catch { /* ignore */ }
           try { await bridge.credSave; } catch { /* already logged */ }

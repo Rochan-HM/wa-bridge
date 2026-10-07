@@ -146,11 +146,12 @@ function buildInbound(msg) {
   return { source: 'whatsapp', entry };
 }
 
-function statusBody({ status, phone, pairingCode, updatedAt }) {
+function statusBody({ status, phone, pairingCode, updatedAt, hasQr }) {
   const body = {
     status,
     phone: phone || null,
     updatedAt,
+    hasQr: status !== 'connected' && !!hasQr,
   };
   if (status === 'waiting-for-pairing-code' && pairingCode) body.pairingCode = pairingCode;
   return body;
