@@ -2,8 +2,20 @@
 
 const http = require('http');
 const pino = require('pino');
+const QRCode = require('qrcode');
 const { HttpError, checkBearer } = require('./format');
 const { createBridge } = require('./bridge');
+
+const QR_PNG_OPTIONS = {
+  type: 'png',
+  errorCorrectionLevel: 'M',
+  margin: 2,
+  width: 512,
+};
+
+function renderQrPng(text) {
+  return QRCode.toBuffer(text, QR_PNG_OPTIONS);
+}
 
 const MAX_BODY = 1_000_000;
 
@@ -65,6 +77,17 @@ function createServer(bridge, env = process.env, logger = pino({ level: 'silent'
       }
       if (req.method === 'GET' && path === '/status') {
         return sendJson(res, 200, bridge.getStatus());
+      }
+      if (req.method === 'GET' && (path === '/qr' || path === '/qr.json')) {
+        const info = bridge.getQr();
+        if (path === '/qr.json') return sendJson(res, 200, info);
+        const png = await renderQrPng(info.qr);
+        res.writeHead(200, {
+          'content-type': 'image/png',
+          'content-length': png.length,
+          'cache-control': 'no-store',
+        });
+        return res.end(png);
       }
       if (req.method === 'POST' && path === '/pair') {
         const body = await readJson(req);
@@ -132,4 +155,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { createServer, main };
+module.exports = { createServer, main, renderQrPng };

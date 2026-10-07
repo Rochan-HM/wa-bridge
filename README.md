@@ -1,6 +1,6 @@
 # wa-bridge
 
-Always-on WhatsApp companion for a number that is already registered. One Node process links as a device with a phone pairing code, keeps the Baileys session on a volume, and exposes a small HTTP API. Inbound messages are posted to your webhook. Outbound sends are authenticated.
+Always-on WhatsApp companion for a number that is already registered. One Node process links as a device with a QR code or a phone pairing code, keeps the Baileys session on a volume, and exposes a small HTTP API. Inbound messages are posted to your webhook. Outbound sends are authenticated.
 
 This uses [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys), an unofficial WhatsApp Web client. It does not register a new account. WhatsApp can limit or ban numbers that use unofficial clients.
 
@@ -8,7 +8,7 @@ This uses [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys)
 
 1. New resource → Application. Build pack: **Dockerfile**. Port: **3000**.
 2. Leave the public domain empty when nothing else needs to call in. The bridge only has to reach the internet for WhatsApp and, if you set one, `WEBHOOK_URL`.
-3. Persistent storage: mount a volume at **`/data`**. The session lives in `/data/baileys-auth` (`AUTH_DIR`). Inbox and the send queue are `/data/inbox.jsonl` and `/data/outbox.jsonl`, so they stay on the same volume. Deleting the volume unlinks the companion; you will need a new pairing code.
+3. Persistent storage: mount a volume at **`/data`**. The session lives in `/data/baileys-auth` (`AUTH_DIR`). Inbox and the send queue are `/data/inbox.jsonl` and `/data/outbox.jsonl`, so they stay on the same volume. Deleting the volume unlinks the companion; you will need a new QR or pairing code.
 4. Health check path: **`/health`** (method `GET`). Do not use `/status`. `/health` stays `200` whenever the HTTP server is up, including while WhatsApp is logged out, reconnecting, or waiting for a pairing code. `/status` is only the WhatsApp session state.
 5. Set the environment variables below and deploy. The container runs a single process: `node server.js`.
 
@@ -49,10 +49,28 @@ Always `200` when the HTTP server is up. This is the Coolify health check. It do
 `GET /status`
 
 ```json
-{ "status": "waiting-for-pairing-code", "phone": "15551234567", "pairingCode": "ABCD1234", "updatedAt": "2026-01-01T00:00:00.000Z" }
+{ "status": "waiting-for-pairing-code", "phone": "15551234567", "pairingCode": "ABCD1234", "hasQr": true, "updatedAt": "2026-01-01T00:00:00.000Z" }
 ```
 
-`status` is one of `starting`, `waiting-for-pairing-code`, `connected`, `reconnecting`, `loggedOut`, `dead`. `pairingCode` is present only while a code is waiting to be entered. `phone` is the `PAIR_PHONE` / pair request, or the linked user id once connected.
+`status` is one of `starting`, `waiting-for-pairing-code`, `connected`, `reconnecting`, `loggedOut`, `dead`. `hasQr` is true while a scannable QR is waiting. The raw QR string is not included. `pairingCode` is present only while a phone code is waiting to be entered. `phone` is the `PAIR_PHONE` / pair request, or the linked user id once connected.
+
+`GET /qr`
+
+PNG image of the latest Baileys pairing QR. No auth. WhatsApp refreshes the code about every 20 seconds; the response is `cache-control: no-store`, so fetch it again if a scan fails. `404` until a code is ready, `409` when the companion is already linked.
+
+```bash
+curl -fsS -o wa-qr.png http://127.0.0.1:3000/qr
+```
+
+On the phone: **WhatsApp → Settings → Linked devices → Link a device**, then scan the PNG. This does not need a public Coolify domain — call it from the container shell, a private network, or the same place you call `POST /pair`.
+
+`GET /qr.json`
+
+```json
+{ "qr": "https://wa.me/settings/linked_devices#…", "updatedAt": "2026-01-01T00:00:00.000Z", "status": "waiting-for-pairing-code" }
+```
+
+Debug only. `qr` is the Baileys pairing payload (`https://wa.me/settings/linked_devices#…`).
 
 `POST /pair`
 
@@ -68,7 +86,7 @@ Body is optional. With no `phone`, the bridge uses `PAIR_PHONE`. Response:
 { "pairingCode": "ABCD1234", "phone": "15551234567" }
 ```
 
-On the phone: **WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead**, then enter the code. If `PAIR_PHONE` is set, the process also requests a code on its own once the socket is ready; `GET /status` and the logs show it. A repeated `POST /pair` for the same number returns the current code for about two minutes instead of invalidating it.
+On the phone: **WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead**, then enter the code. If that fails with “Couldn’t link device”, use `GET /qr` and the camera instead. If `PAIR_PHONE` is set, the process also requests a code on its own once the socket is ready; `GET /status` and the logs show it. A repeated `POST /pair` for the same number returns the current code for about two minutes instead of invalidating it. Phone pairing and the QR can both be waiting; either one can link the device.
 
 `POST /send`
 
@@ -83,13 +101,13 @@ curl -s -X POST http://127.0.0.1:3000/send \
 
 `POST /logout`
 
-Deletes the contents of `AUTH_DIR` (the directory itself stays, so a mounted volume is safe), unlinks the companion when the socket is up, and opens a new socket for pairing. The HTTP server stays up. `PAIR_PHONE` is still the default number.
+Deletes the contents of `AUTH_DIR` (the directory itself stays, so a mounted volume is safe), unlinks the companion when the socket is up, and opens a new socket for pairing. The previous QR is discarded with the old socket. The HTTP server stays up. `PAIR_PHONE` is still the default number.
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/logout
 ```
 
-`/pair` and `/logout` are not authenticated. Do not publish this port to the internet. `POST /send` is the only route that checks `API_TOKEN`.
+`/pair`, `/qr`, `/qr.json`, and `/logout` are not authenticated. Do not publish this port to the internet. `POST /send` is the only route that checks `API_TOKEN`.
 
 After WhatsApp logs the device out, status becomes `loggedOut` and the process does **not** exit or reconnect. Call `POST /logout` to wipe the auth files and pair again.
 

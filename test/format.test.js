@@ -128,25 +128,37 @@ test('buildInbound shapes notify messages and skips own and protocol', () => {
   }), null);
 });
 
-test('status body includes pairingCode only while waiting', () => {
+test('status body includes pairingCode only while waiting and never the qr payload', () => {
   assert.deepEqual(statusBody({
     status: 'connected',
     phone: '15551234567',
     pairingCode: 'ABCD1234',
     updatedAt: 't',
-  }), { status: 'connected', phone: '15551234567', updatedAt: 't' });
+    hasQr: true,
+  }), { status: 'connected', phone: '15551234567', updatedAt: 't', hasQr: false });
 
   assert.deepEqual(statusBody({
     status: 'waiting-for-pairing-code',
     phone: '15551234567',
     pairingCode: 'ABCD1234',
     updatedAt: 't',
+    hasQr: true,
   }), {
     status: 'waiting-for-pairing-code',
     phone: '15551234567',
     pairingCode: 'ABCD1234',
     updatedAt: 't',
+    hasQr: true,
   });
+
+  const waiting = statusBody({
+    status: 'starting',
+    phone: null,
+    updatedAt: 't',
+  });
+  assert.equal(waiting.hasQr, false);
+  assert.equal(Object.hasOwn(waiting, 'qr'), false);
+  assert.equal(Object.hasOwn(waiting, 'pairingCode'), false);
 });
 
 test('phoneFromUserId strips the device suffix', () => {
