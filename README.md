@@ -9,8 +9,14 @@ This uses [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys)
 1. New resource → Application. Build pack: **Dockerfile**. Port: **3000**.
 2. Leave the public domain empty when nothing else needs to call in. The bridge only has to reach the internet for WhatsApp and, if you set one, `WEBHOOK_URL`.
 3. Persistent storage: mount a volume at **`/data`**. The session lives in `/data/baileys-auth` (`AUTH_DIR`). Inbox and the send queue are `/data/inbox.jsonl` and `/data/outbox.jsonl`, so they stay on the same volume. Deleting the volume unlinks the companion; you will need a new pairing code.
-4. Health check: `GET /health`. That endpoint is process liveness. It stays `200` when WhatsApp is logged out or reconnecting, so Coolify does not restart the container and drop an in-progress pairing code. Use `GET /status` for the WhatsApp state.
+4. Health check path: **`/health`** (method `GET`). Do not use `/status`. `/health` stays `200` whenever the HTTP server is up, including while WhatsApp is logged out, reconnecting, or waiting for a pairing code. `/status` is only the WhatsApp session state.
 5. Set the environment variables below and deploy. The container runs a single process: `node server.js`.
+
+`node:20-bookworm-slim` does not include `curl` or `wget`. Coolify's default check runs `curl` inside the container, so this image installs `curl`. The image also has a Docker `HEALTHCHECK` that does not need it. To use that instead of curl, set Coolify's custom health check command to:
+
+```
+node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+```
 
 Redeploys send `SIGTERM`. The process closes the socket and **does not** unlink the device. The session on `/data` is reused.
 
@@ -33,6 +39,8 @@ Generate a token with `openssl rand -hex 24`. Do not commit tokens, auth files, 
 ## HTTP API
 
 `GET /health`
+
+Always `200` when the HTTP server is up. This is the Coolify health check. It does not look at the WhatsApp socket.
 
 ```json
 { "ok": true }
